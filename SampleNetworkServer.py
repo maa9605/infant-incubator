@@ -10,6 +10,9 @@ import os
 import errno
 import random
 import string
+import hashlib
+import apis
+import ssl
 
 class SmartNetworkThermometer (threading.Thread) :
     open_cmds = ["AUTH", "LOGOUT"]
@@ -23,13 +26,29 @@ class SmartNetworkThermometer (threading.Thread) :
         self.curTemperature = 0
         self.updateTemperature()
         self.tokens = []
-
-        self.serverSocket = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
+	
+        self.serverSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.serverSocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        #wrap TCP socket in an SSL wrapper
+        self.serverSocket = ssl.wrap_socket(self.serverSocket, server_side=True, keyfile="key.pem", certfile="cert.pem")
         self.serverSocket.bind(("127.0.0.1", port))
+        self.serverSocket.listen(0)
         fcntl.fcntl(self.serverSocket, fcntl.F_SETFL, os.O_NONBLOCK)
 
         self.deg = "K"
-
+        
+    def authClient(self):
+    	#HASH of API Key
+    	hashObj = hashlib.sha256()
+    	hashObj.update(apis.API_KEY.encode())
+    	hashedPass = hashObj.hexdigest()
+    	return hashedPass
+    	
+    def sendMessage(self, conn, message):
+    
+        msg = message.encode("utf-8")
+        conn.send(msg)
+        
     def setSource(self, source) :
         self.source = source
 
@@ -52,21 +71,24 @@ class SmartNetworkThermometer (threading.Thread) :
 
         return self.curTemperature
 
-    def processCommands(self, msg, addr) :
+    def processCommands(self, msg, conn) :
         cmds = msg.split(';')
         for c in cmds :
             cs = c.split(' ')
             if len(cs) == 2 : #should be either AUTH or LOGOUT
                 if cs[0] == "AUTH":
-                    if cs[1] == "!Q#E%T&U8i6y4r2w" :
+                    if cs[1] == self.authClient() and len(self.tokens) < 11:
                         self.tokens.append(''.join(random.choice(string.ascii_uppercase + string.ascii_lowercase + string.digits) for _ in range(16)))
-                        self.serverSocket.sendto(self.tokens[-1].encode("utf-8"), addr)
-                        #print (self.tokens[-1])
+                        self.sendMessage(conn, self.tokens[-1])
+                    else:
+                        print("Max Connections Reached!")
+                        
                 elif cs[0] == "LOGOUT":
                     if cs[1] in self.tokens :
                         self.tokens.remove(cs[1])
                 else : #unknown command
-                    self.serverSocket.sendto(b"Invalid Command\n", addr)
+                    self.sendMessage(conn, "Invalid Command\n")
+              
             elif c == "SET_DEGF" :
                 self.deg = "F"
             elif c == "SET_DEGC" :
@@ -74,38 +96,41 @@ class SmartNetworkThermometer (threading.Thread) :
             elif c == "SET_DEGK" :
                 self.deg = "K"
             elif c == "GET_TEMP" :
-                self.serverSocket.sendto(b"%f\n" % self.getTemperature(), addr)
+                self.sendMessage(conn, "%f\n" % self.getTemperature())
             elif c == "UPDATE_TEMP" :
                 self.updateTemperature()
             elif c :
-                self.serverSocket.sendto(b"Invalid Command\n", addr)
-
+                self.sendMessage(conn, "Invalid Command\n")
+               
+        
 
     def run(self) : #the running function
         while True : 
             try :
-                msg, addr = self.serverSocket.recvfrom(1024)
-                msg = msg.decode("utf-8").strip()
-                cmds = msg.split(' ')
-                if len(cmds) == 1 : # protected commands case
-                    semi = msg.find(';')
-                    if semi != -1 : #if we found the semicolon
+               connection, addr = self.serverSocket.accept()
+               while True:
+                  msg = connection.recv(1024)
+                  msg = msg.decode("utf-8").strip()
+                  cmds = msg.split(' ')
+                  
+                  if len(cmds) == 1 : # protected commands case
+                     semi = msg.find(';')
+                     if semi != -1 : #if we found the semicolon
                         #print (msg)
                         if msg[:semi] in self.tokens : #if its a valid token
-                            self.processCommands(msg[semi+1:], addr)
+                           self.processCommands(msg[semi+1:], connection)
                         else :
-                            self.serverSocket.sendto(b"Bad Token\n", addr)
-                    else :
-                            self.serverSocket.sendto(b"Bad Command\n", addr)
-                elif len(cmds) == 2 :
-                    if cmds[0] in self.open_cmds : #if its AUTH or LOGOUT
-                        self.processCommands(msg, addr) 
-                    else :
-                        self.serverSocket.sendto(b"Authenticate First\n", addr)
-                else :
-                    # otherwise bad command
-                    self.serverSocket.sendto(b"Bad Command\n", addr)
-    
+                            self.sendMessage(conn, "Bad Token\n")
+                
+                  elif len(cmds) == 2 :
+                     if cmds[0] in self.open_cmds : #if its AUTH or LOGOUT
+                        self.processCommands(msg, connection) 
+                     else :
+                        self.sendMessage(conn, "Authenticate First\n")
+                  else :
+                     # otherwise bad command
+                     self.sendMessage(conn, "Bad Command\n")
+                
             except IOError as e :
                 if e.errno == errno.EWOULDBLOCK :
                     #do nothing
@@ -118,6 +143,7 @@ class SmartNetworkThermometer (threading.Thread) :
  
 
             self.updateTemperature()
+        
             time.sleep(self.updatePeriod)
 
 
