@@ -36,15 +36,34 @@ class SmartNetworkThermometer (threading.Thread) :
         fcntl.fcntl(self.serverSocket, fcntl.F_SETFL, os.O_NONBLOCK)
 
         self.deg = "K"
-        
-    def authClient(self):
-    	#HASH of API Key
+    '''    
+    def authClient(self, raw): #hashing function for the tokens and API keys
     	hashObj = hashlib.sha256()
-    	hashObj.update(apis.API_KEY.encode())
-    	hashedPass = hashObj.hexdigest()
-    	return hashedPass
+    	saltedRaw = "12345" + raw
     	
-    def sendMessage(self, conn, message):
+    	hashObj.update(raw.encode())
+    	hashedPass = bytes(hashObj.hexdigest(), 'utf-8')
+    	return hashedPass
+    '''	
+    def authClient(self,raw,nonce=''): #hashing function for the tokens and API keys
+   
+        hashObj = hashlib.sha256()
+        saltedRaw = "12345" + raw
+           
+        #if there is a nonce string use it to verify the hash that was sent. 
+        if nonce == '':
+           nonce = str(random.getrandbits(16))
+        else: 
+           nonce = nonce #raw[1:int(raw[:1])+1]
+      
+        noncedsaltedRaw = nonce + saltedRaw
+        hashObj.update(noncedsaltedRaw.encode())
+        hashedPass = bytes(hashObj.hexdigest(), 'utf-8')
+        hashedPass = bytes(str(len(nonce)),'utf-8') + bytes(nonce,'utf-8') + hashedPass
+        
+        return hashedPass
+        
+    def sendMessage(self, conn, message):  #consolidated all send message functions in one function 
     
         msg = message.encode("utf-8")
         conn.send(msg)
@@ -77,7 +96,8 @@ class SmartNetworkThermometer (threading.Thread) :
             cs = c.split(' ')
             if len(cs) == 2 : #should be either AUTH or LOGOUT
                 if cs[0] == "AUTH":
-                    if cs[1] == self.authClient() and len(self.tokens) < 11:
+                    #limit the number of connected users with tokens to 10
+                    if bytes(cs[1],'utf-8') == self.authClient(apis.API_KEY,cs[1][1:int(cs[1][:1])+1]) and len(self.tokens) < 10: 
                         self.tokens.append(''.join(random.choice(string.ascii_uppercase + string.ascii_lowercase + string.digits) for _ in range(16)))
                         self.sendMessage(conn, self.tokens[-1])
                     else:
@@ -117,7 +137,7 @@ class SmartNetworkThermometer (threading.Thread) :
                      semi = msg.find(';')
                      if semi != -1 : #if we found the semicolon
                         #print (msg)
-                        if msg[:semi] in self.tokens : #if its a valid token
+                        if msg[:semi] in self.tokens : #if its a valid token NEED TO ADD SOMETHING HERE TO HASH THE TOKENS FOR TRANSIT 
                            self.processCommands(msg[semi+1:], connection)
                         else :
                             self.sendMessage(conn, "Bad Token\n")
